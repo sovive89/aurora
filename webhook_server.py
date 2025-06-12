@@ -17,7 +17,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # Carregar variáveis de ambiente
 load_dotenv()
 
-# Configurações da ElevenLabs
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "Sm1seazb4gs7RSlUVw7c")
 ELEVENLABS_AGENT_ID = os.getenv("ELEVENLABS_AGENT_ID", "agent_01jxf0xa1wfwm8gp30wt7nj7zn")
@@ -26,7 +25,6 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 app = Flask(__name__)
 CORS(app)
 
-# Armazenamento em memória para sessões
 sessions = {}
 
 @app.route("/", methods=["GET"])
@@ -41,30 +39,24 @@ def chat():
 
     try:
         signed_url_endpoint = "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url"
-        headers = {
-            "xi-api-key": ELEVENLABS_API_KEY
-        }
-        params = {
-            "agent_id": ELEVENLABS_AGENT_ID
-        }
+        headers = { "xi-api-key": ELEVENLABS_API_KEY }
+        params = { "agent_id": ELEVENLABS_AGENT_ID }
 
         logging.info(f"Obtendo URL assinada para o agente: {ELEVENLABS_AGENT_ID}")
         logging.info(f"Endpoint: {signed_url_endpoint}")
         logging.info(f"Headers: {json.dumps({'xi-api-key': '****'})}")
         logging.info(f"Params: {json.dumps(params)}")
-        logging.info(f"Método: GET")
+        logging.info("Método: GET")
 
         signed_url_response = requests.get(
-            signed_url_endpoint, 
-            headers=headers,
-            params=params
+            signed_url_endpoint, headers=headers, params=params
         )
 
         logging.info(f"Status code: {signed_url_response.status_code}")
         logging.info(f"Response text: {signed_url_response.text}")
 
         if signed_url_response.status_code != 200:
-            logging.error(f"Erro ao obter URL assinada: Status {signed_url_response.status_code}, Resposta: {signed_url_response.text}")
+            logging.error(f"Erro ao obter URL assinada: {signed_url_response.status_code} - {signed_url_response.text}")
             signed_url_response.raise_for_status()
 
         signed_url_data = signed_url_response.json()
@@ -72,9 +64,8 @@ def chat():
 
         if not ws_url:
             raise Exception("Não foi possível obter a URL assinada para o WebSocket.")
-        
-        logging.info(f"URL WebSocket obtida: {ws_url}")
 
+        logging.info(f"URL WebSocket obtida: {ws_url}")
         ws = websocket.create_connection(ws_url)
 
         init_message = {
@@ -103,7 +94,6 @@ def chat():
         def generate_audio_stream_ws():
             try:
                 logging.info("Iniciando stream de áudio...")
-
                 while True:
                     try:
                         message = ws.recv()
@@ -116,4 +106,72 @@ def chat():
                             if message_type == "audio" and "audio_base_64" in data.get("audio_event", {}):
                                 audio_data = base64.b64decode(data["audio_event"]["audio_base_64"])
                                 yield audio_data
-                            elif message_type == "agent_response" and data.get
+                            elif message_type == "agent_response" and data.get("agent_response_event", {}).get("is_final"):
+                                break
+                    except Exception as e:
+                        logging.error(f"Erro ao processar mensagem WebSocket: {e}")
+                        break
+            finally:
+                try:
+                    if ws:
+                        ws.close()
+                        logging.info("Conexão WebSocket fechada.")
+                except:
+                    pass
+
+        return Response(stream_with_context(generate_audio_stream_ws()), mimetype="audio/mpeg")
+
+    except Exception as e:
+        logging.error(f"Erro: {e}")
+        try:
+            tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream"
+            headers = {
+                "xi-api-key": ELEVENLABS_API_KEY,
+                "Content-Type": "application/json"
+            }
+            tts_json_data = {
+                "text": "Desculpe, não consegui me conectar ao meu cérebro mágico. Vou apenas repetir o que você disse: " + user_message,
+                "model_id": "eleven_multilingual_v2",
+                "stream": True
+            }
+
+            logging.info(f"Usando fallback TTS com a mensagem: {tts_json_data['text']}")
+            response = requests.post(tts_url, headers=headers, json=tts_json_data, stream=True)
+            response.raise_for_status()
+
+            def generate_audio_stream_tts():
+                for chunk in response.iter_content(chunk_size=4096):
+                    if chunk:
+                        yield chunk
+
+            return Response(stream_with_context(generate_audio_stream_tts()), mimetype="audio/mpeg")
+
+        except Exception as e_tts:
+            logging.error(f"Erro ao usar a API de TTS: {e_tts}")
+            return jsonify({"error": f"Falha ao gerar áudio: {e_tts}"}), 500
+
+@app.route("/webhook", methods=["POST"])
+def webhook_handler():
+    try:
+        data = request.json
+        logging.info(f"Webhook recebido: {json.dumps(data)}")
+
+        event_type = data.get("type")
+        if event_type:
+            logging.info(f"Processando evento do tipo: {event_type}")
+
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        logging.error(f"Erro ao processar webhook: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "version": "1.0.0"
+    })
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
